@@ -46,6 +46,7 @@ var RootSubscription = graphql.NewObject(graphql.ObjectConfig{
 		"feed": &graphql.Field{
 			Type: FeedType,
 			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+				log.Printf("[RootSubscription.feed.Resolve] >>>>>>>>>>>>>>> p.Source: %+v", p.Source)
 				go func() {
 					for {
 						select {
@@ -56,11 +57,9 @@ var RootSubscription = graphql.NewObject(graphql.ObjectConfig{
 					}
 				}()
 				return p.Source, nil
-				// return nil, nil
 			},
 			Subscribe: func(p graphql.ResolveParams) (interface{}, error) {
 				c := make(chan interface{})
-				log.Printf("ctx ptr Subscribe: %p", p.Context)
 
 				go func() {
 					var i int
@@ -194,13 +193,11 @@ func SubscriptionsHandler(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[Subscription] message received: %+v", msg)
 
 			ctx, cancel := context.WithCancel(context.Background())
-			log.Printf("ctx ptr: %p", ctx)
 
 			go func() {
 				for {
 					select {
 					case <-ctx.Done():
-						log.Printf("ctx ptr done-0: %p", ctx)
 						log.Printf("[Subscription] done-0!")
 						return
 					}
@@ -211,7 +208,6 @@ func SubscriptionsHandler(w http.ResponseWriter, r *http.Request) {
 				for {
 					select {
 					case <-ctx.Done():
-						log.Printf("ctx ptr done-1: %p", ctx)
 						log.Printf("[Subscription] done-1!")
 						return
 					}
