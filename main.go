@@ -9,23 +9,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/handler"
 )
-
-var RootQuery = graphql.NewObject(graphql.ObjectConfig{
-	Name: "RootQuery",
-	Fields: graphql.Fields{
-		"ping": &graphql.Field{
-			Type: graphql.String,
-			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-				return "ok", nil
-			},
-		},
-	},
-})
 
 type Feed struct {
 	ID string `graphql:"id"`
@@ -64,10 +53,9 @@ var RootSubscription = graphql.NewObject(graphql.ObjectConfig{
 							return
 						default:
 							c <- feed
-							log.Printf("[RootSubscription] [Subscribe] sent: %+v", feed)
 						}
 						time.Sleep(300 * time.Millisecond)
-						if i == 20 {
+						if i == 140 {
 							close(c)
 							return
 						}
@@ -75,6 +63,18 @@ var RootSubscription = graphql.NewObject(graphql.ObjectConfig{
 				}()
 
 				return c, nil
+			},
+		},
+	},
+})
+
+var RootQuery = graphql.NewObject(graphql.ObjectConfig{
+	Name: "RootQuery",
+	Fields: graphql.Fields{
+		"ping": &graphql.Field{
+			Type: graphql.String,
+			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+				return "ok", nil
 			},
 		},
 	},
@@ -127,7 +127,7 @@ type ConnectionACKMessage struct {
 }
 
 type Subscriber struct {
-	ID            int
+	UUID          string
 	Conn          *websocket.Conn
 	RequestString string
 	OperationID   string
@@ -135,10 +135,21 @@ type Subscriber struct {
 
 var subscribers sync.Map
 
+func subscribersSize() uint64 {
+	var size uint64
+	subscribers.Range(func(_, _ interface{}) bool {
+		size++
+		return true
+	})
+	return size
+}
+
 func SubscriptionsHandler(w http.ResponseWriter, r *http.Request) {
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("failed to do websocket upgrade: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -147,28 +158,41 @@ func SubscriptionsHandler(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		log.Printf("failed to marshal ws connection ack: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	if err := conn.WriteMessage(websocket.TextMessage, connectionACK); err != nil {
 		log.Printf("failed to write to ws connection: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	var startCtxCancel context.CancelFunc
-
 	go func() {
+		subscriptionCtx, subscriptionCancelFn := context.WithCancel(context.Background())
+
+		var subscriber *Subscriber
+
+		unsubscribe := func() {
+			subscriptionCancelFn()
+			if subscriber != nil {
+				subscriber.Conn.Close()
+				subscribers.Delete(subscriber.UUID)
+			}
+			log.Printf("[SubscriptionsHandler] subscribers size: %+v", subscribersSize())
+		}
+
 		for {
 			_, p, err := conn.ReadMessage()
 			if websocket.IsCloseError(err, websocket.CloseGoingAway) {
 				log.Println("[SubscriptionsHandler] subscriber closed connection")
-				startCtxCancel()
+				unsubscribe()
 				return
 			}
 
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway) {
 				log.Println("[SubscriptionsHandler] subscriber closed connection")
-				startCtxCancel()
+				unsubscribe()
 				return
 			}
 
@@ -183,39 +207,24 @@ func SubscriptionsHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
-
-			go func() {
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					}
-				}
-			}()
+			log.Printf("[SubscriptionsHandler] msg.Type: %v", msg.Type)
 
 			if msg.Type == "stop" {
-				log.Printf("[Subscription] subscriber stopped connection")
-				startCtxCancel()
+				log.Printf("[SubscriptionsHandler] subscriber stopped connection")
+				unsubscribe()
 				return
 			}
 
 			if msg.Type == "start" {
-				length := 0
-
-				subscribers.Range(func(key, value interface{}) bool {
-					length++
-					return true
-				})
-
-				var subscriber = Subscriber{
-					ID:            length + 1,
+				subscriber = &Subscriber{
+					UUID:          uuid.New().String(),
 					Conn:          conn,
 					RequestString: msg.Payload.Query,
 					OperationID:   msg.OperationID,
 				}
+				subscribers.Store(subscriber.UUID, &subscriber)
 
-				subscribers.Store(subscriber.ID, &subscriber)
+				log.Printf("[SubscriptionsHandler] subscribers size: %+v", subscribersSize())
 
 				sendMessage := func(r *graphql.Result) {
 					message, err := json.Marshal(map[string]interface{}{
@@ -230,7 +239,7 @@ func SubscriptionsHandler(w http.ResponseWriter, r *http.Request) {
 
 					if err := subscriber.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
 						if err == websocket.ErrCloseSent {
-							subscribers.Delete(subscriber.ID)
+							unsubscribe()
 							return
 						}
 
@@ -240,10 +249,8 @@ func SubscriptionsHandler(w http.ResponseWriter, r *http.Request) {
 				}
 
 				go func() {
-					startCtxCancel = cancel
-
 					subscribeParams := graphql.Params{
-						Context:       ctx,
+						Context:       subscriptionCtx,
 						RequestString: msg.Payload.Query,
 						Schema:        schema,
 					}
@@ -252,7 +259,7 @@ func SubscriptionsHandler(w http.ResponseWriter, r *http.Request) {
 
 					for {
 						select {
-						case <-ctx.Done():
+						case <-subscriptionCtx.Done():
 							return
 						case r, isOpen := <-subscribeChannel:
 							if !isOpen {
