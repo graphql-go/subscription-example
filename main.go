@@ -46,16 +46,6 @@ var RootSubscription = graphql.NewObject(graphql.ObjectConfig{
 		"feed": &graphql.Field{
 			Type: FeedType,
 			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-				log.Printf("[RootSubscription.feed.Resolve] >>>>>>>>>>>>>>> p.Source: %+v", p.Source)
-				go func() {
-					for {
-						select {
-						case <-p.Context.Done():
-							log.Printf("[Subscription] done-2!")
-							return
-						}
-					}
-				}()
 				return p.Source, nil
 			},
 			Subscribe: func(p graphql.ResolveParams) (interface{}, error) {
@@ -69,13 +59,15 @@ var RootSubscription = graphql.NewObject(graphql.ObjectConfig{
 						i++
 						select {
 						case <-p.Context.Done():
-							log.Println("[Subscribe Resolver] subscribe channel closed")
+							log.Println("[RootSubscription] [Subscribe] subscription canceled")
 							close(c)
 							return
-						case c <- feed:
+						default:
+							c <- feed
+							log.Printf("[RootSubscription] [Subscribe] sent: %+v", feed)
 						}
 						time.Sleep(300 * time.Millisecond)
-						if i == 10 {
+						if i == 20 {
 							close(c)
 							return
 						}
@@ -112,7 +104,6 @@ func main() {
 	http.HandleFunc("/subscriptions", SubscriptionsHandler)
 
 	log.Println("GraphQL Server running on [POST]: localhost:8081/graphql")
-
 	log.Println("GraphQL Playground running on [GET]: localhost:8081/graphql")
 
 	log.Fatal(http.ListenAndServe(":8081", nil))
@@ -170,12 +161,14 @@ func SubscriptionsHandler(w http.ResponseWriter, r *http.Request) {
 		for {
 			_, p, err := conn.ReadMessage()
 			if websocket.IsCloseError(err, websocket.CloseGoingAway) {
-				log.Println("[Subscription] subscriber closed connection")
+				log.Println("[SubscriptionsHandler] subscriber closed connection")
+				startCtxCancel()
 				return
 			}
 
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway) {
-				log.Println("[Subscription] subscriber closed connection")
+				log.Println("[SubscriptionsHandler] subscriber closed connection")
+				startCtxCancel()
 				return
 			}
 
@@ -190,25 +183,12 @@ func SubscriptionsHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			log.Printf("[Subscription] message received: %+v", msg)
-
 			ctx, cancel := context.WithCancel(context.Background())
 
 			go func() {
 				for {
 					select {
 					case <-ctx.Done():
-						log.Printf("[Subscription] done-0!")
-						return
-					}
-				}
-			}()
-
-			go func() {
-				for {
-					select {
-					case <-ctx.Done():
-						log.Printf("[Subscription] done-1!")
 						return
 					}
 				}
@@ -236,8 +216,6 @@ func SubscriptionsHandler(w http.ResponseWriter, r *http.Request) {
 				}
 
 				subscribers.Store(subscriber.ID, &subscriber)
-
-				log.Printf("[Subscription] subscriber registered, query: %v", msg.Payload.Query)
 
 				sendMessage := func(r *graphql.Result) {
 					message, err := json.Marshal(map[string]interface{}{
@@ -271,16 +249,13 @@ func SubscriptionsHandler(w http.ResponseWriter, r *http.Request) {
 					}
 
 					subscribeChannel := graphql.Subscribe(subscribeParams)
-					// defer close(subscribeChannel)
 
 					for {
 						select {
 						case <-ctx.Done():
-							log.Println("here 888")
 							return
 						case r, isOpen := <-subscribeChannel:
 							if !isOpen {
-								log.Println("subscribeChannel closed")
 								return
 							}
 							sendMessage(r)
