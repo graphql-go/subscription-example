@@ -59,7 +59,7 @@ var RootSubscription = graphql.NewObject(graphql.ObjectConfig{
 
 						time.Sleep(250 * time.Millisecond)
 
-						if i == 11 {
+						if i == 21 {
 							close(c)
 							return
 						}
