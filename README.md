@@ -1,6 +1,6 @@
 # subscription-example
 
-An example project showing how to use `graphql.Subscription` with GraphQL Playground.
+An example project showing how to use `graphql.Subscribe` with GraphQL Playground.
 
 #### Getting Started
 
